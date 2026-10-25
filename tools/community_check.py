@@ -31,7 +31,7 @@ _DIGIT_WORDS = (
     "cero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve"
 )
 _TOKEN = rf"(?:[0-9]|\b(?:{_DIGIT_WORDS})\b)"
-DIGITS = re.compile(rf"{_TOKEN}(?:[ \t.,()/\-]*{_TOKEN}){{3,}}", re.IGNORECASE | re.ASCII)
+DIGITS = re.compile(rf"{_TOKEN}(?:[ \t\u00a0\u2000-\u200a\u202f\u205f\u3000.,()/\-]*{_TOKEN}){{3,}}", re.IGNORECASE | re.ASCII)
 TOP_KEYS = ("format", "number", "name", "contributed_at", "observations")
 OBS_KEYS = ("path", "prompt_text", "options", "outcome", "prompt_seconds", "heard_at", "source")
 
