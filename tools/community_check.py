@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 FORMAT = 1
 MAX_BYTES = 256 * 1024
@@ -179,6 +179,8 @@ def check(relpath: str, body: bytes) -> list[str]:
             out.append(f"name must be a company name, got {_short(name)}.")
         elif len(name) > MAX_NAME:
             out.append(f"name is {len(name)} characters; the limit is {MAX_NAME}.")
+        elif DIGITS.search(name):
+            out.append("name still holds a run of 4 or more digits, which could be a private number.")
     day = doc.get("contributed_at")
     if "contributed_at" in doc:
         if not _day_ok(day):
@@ -213,10 +215,11 @@ def _main(argv: list[str]) -> int:
     if not os.path.isdir(root):
         print(f"  invalid  {root}: not a folder")
         return 1
+    limit = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
     found: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames.sort()
-        for name in sorted(filenames):
+        for name in sorted(filenames + [d for d in dirnames if d.endswith(".json")]):
             if name != ".gitkeep":
                 found.append(os.path.join(dirpath, name))
     invalid = 0
@@ -224,11 +227,16 @@ def _main(argv: list[str]) -> int:
         rel = "trees/" + os.path.relpath(full, root).replace(os.sep, "/")
         if os.path.islink(full):
             problems = ["A link is not a contribution file."]
+        elif os.path.isdir(full):
+            problems = ["A folder cannot be named like a contribution file."]
         elif not full.endswith(".json"):
             problems = ["Only .json contribution files belong here."]
         else:
             with open(full, "rb") as f:
-                problems = check(rel, f.read(MAX_BYTES + 1))
+                data = f.read(MAX_BYTES + 1)
+            problems = check(rel, data)
+            if not problems and json.loads(data)["contributed_at"] > limit:
+                problems = [f"contributed_at {json.loads(data)['contributed_at']} is in the future."]
         for p in problems[:1]:
             print(f"  invalid  {rel}: {p}")
         invalid += bool(problems)
