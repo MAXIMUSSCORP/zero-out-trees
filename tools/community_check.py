@@ -184,3 +184,43 @@ def check(relpath: str, body: bytes) -> list[str]:
     if len(out) > MAX_ERRORS:
         out = out[:MAX_ERRORS] + [f"{len(out) - MAX_ERRORS} more problems were not listed."]
     return out
+
+
+def _main(argv: list[str]) -> int:
+    import os
+    import sys
+
+    if len(argv) != 2:
+        print("usage: python community_check.py <folder>", file=sys.stderr)
+        return 2
+    root = argv[1]
+    if not os.path.isdir(root):
+        print(f"  invalid  {root}: not a folder")
+        return 1
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if name != ".gitkeep":
+                found.append(os.path.join(dirpath, name))
+    invalid = 0
+    for full in found:
+        rel = "trees/" + os.path.relpath(full, root).replace(os.sep, "/")
+        if os.path.islink(full):
+            problems = ["A link is not a contribution file."]
+        elif not full.endswith(".json"):
+            problems = ["Only .json contribution files belong here."]
+        else:
+            with open(full, "rb") as f:
+                problems = check(rel, f.read(MAX_BYTES + 1))
+        for p in problems[:1]:
+            print(f"  invalid  {rel}: {p}")
+        invalid += bool(problems)
+    print(f"  checked  {len(found)} files, {invalid} invalid")
+    return 1 if invalid else 0
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main(sys.argv))

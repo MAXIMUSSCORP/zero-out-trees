@@ -22,7 +22,7 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          changes=$(git diff --no-renames --name-status "$BASE"...HEAD -- trees/ | grep -v '^A	' || true)
+          changes=$(git diff --no-renames --name-status "$BASE"...HEAD -- trees/ | awk '$1 != "A"')
           if [ -n "$changes" ]; then
             echo "Files under trees/ may only be added, never modified or deleted:"
             echo "$changes"
