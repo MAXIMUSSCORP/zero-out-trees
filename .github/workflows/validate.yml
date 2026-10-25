@@ -1,0 +1,30 @@
+name: validate
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.11"
+      - name: Check every file under trees/
+        run: python tools/community_check.py trees
+      - name: Only added files under trees/
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changes=$(git diff --no-renames --name-status "$BASE"...HEAD -- trees/ | grep -v '^A	' || true)
+          if [ -n "$changes" ]; then
+            echo "Files under trees/ may only be added, never modified or deleted:"
+            echo "$changes"
+            exit 1
+          fi
