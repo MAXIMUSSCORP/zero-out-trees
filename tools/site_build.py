@@ -7,10 +7,12 @@ value goes through esc() before it reaches a page, and no href is built from dat
 except the 10 digit company number.
 """
 import html
-import importlib
+import importlib.util
 import json
 import re
 import sys
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 
 CSP = ("default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self'; "
@@ -98,50 +100,54 @@ def _parse(body):
     return d, []
 
 
-def _ancestor(path, nodes):
-    while path:
-        path = path.rpartition(".")[0]
-        if path in nodes:
-            return path
-        if path == "":
-            break
-    return None
+def _company(entries, today):
+    """entries: list of (order, doc). Returns the per-company model.
 
-
-def _company(entries):
-    """entries: list of (order, doc). Returns the per-company model."""
-    entries = sorted(entries, key=lambda e: (_s(e[1].get("contributed_at")), e[0]))
-    name = _s(entries[-1][1].get("name")) or entries[-1][1]["number"]
+    The tree is walked from the root through the SHOWN options only, so a branch
+    the company removed disappears, as it does in the app. Observations dated after
+    today are ignored: a stranger can write any date into a file."""
+    names = Counter(_s(d.get("name")) for _, d in entries if _s(d.get("name")))
+    number = entries[0][1]["number"]
+    name = min(names, key=lambda n: (-names[n], n)) if names else number
     by_path = {}
     seq = 0
-    for _, d in entries:
+    for _, d in sorted(entries, key=lambda e: (_s(e[1].get("contributed_at")), e[0])):
         for o in d["observations"]:
-            by_path.setdefault(o["path"], []).append((_s(o.get("heard_at")), seq, o))
             seq += 1
+            heard = _s(o.get("heard_at"))[:10]
+            if heard > today:
+                continue
+            by_path.setdefault(o["path"], []).append((heard, seq, o))
     nodes = {}
     sources = {}
-    for path, items in by_path.items():
+
+    def grow(path, depth=0):
+        items = by_path.get(path)
+        if not items or depth > 6:
+            return None
         items.sort(key=lambda t: (t[0], t[1]))
         shown = items[-1][2]
         shape = _shape(shown)
         same = [i for i in items if _shape(i[2]) == shape]
         older = [i for i in items if _shape(i[2]) != shape]
         node = {"path": path, "o": shown, "heard": len(same), "last": items[-1][0],
-                "changed": older[-1][0][:10] if older else None, "src": {}, "kids": []}
+                "changed": older[-1][0] if older else None, "src": {}, "kids": []}
         for _, _, o in items:
-            s = _s(o.get("source")) or "unknown"
-            node["src"][s] = node["src"].get(s, 0) + 1
-            sources[s] = sources.get(s, 0) + 1
+            src = _s(o.get("source")) or "unknown"
+            node["src"][src] = node["src"].get(src, 0) + 1
         nodes[path] = node
-    top = []
-    for path in sorted(nodes, key=lambda p: (p.count("."), p)):
-        if path == "":
-            top.append(nodes[path])
-            continue
-        parent = _ancestor(path, nodes)
-        (nodes[parent]["kids"] if parent is not None else top).append(nodes[path])
+        for key in dict.fromkeys(str(x.get("key", "")) for x in shown.get("options", [])):
+            kid = grow(key if path == "" else f"{path}.{key}", depth + 1)
+            if kid:
+                node["kids"].append(kid)
+        return node
+
+    root = grow("")
+    for n in nodes.values():
+        for k, v in n["src"].items():
+            sources[k] = sources.get(k, 0) + v
     latest = max((n["last"] for n in nodes.values()), default="")
-    return {"name": name, "number": entries[0][1]["number"], "top": top,
+    return {"name": name, "number": number, "top": [root] if root else [],
             "nodes": len(nodes), "latest": latest, "sources": sources}
 
 
@@ -212,13 +218,20 @@ def _company_page(c):
     return _page(c["name"], body, prefix="../")
 
 
-def build(trees_dir, out_dir, *, check=None):
+def build(trees_dir, out_dir, *, check=None, today=None):
+    """today is a date or YYYY-MM-DD string; it defaults to the UTC date."""
     trees_dir, out_dir = Path(trees_dir), Path(out_dir)
-    files = sorted(p for p in trees_dir.rglob("*.json") if p.is_file())
+    today = (datetime.now(timezone.utc).date() if today is None else today)
+    today = today if isinstance(today, str) else today.isoformat()
+    root = trees_dir.resolve()
+    files = sorted(p for p in trees_dir.rglob("*.json") if p.is_file() or p.is_symlink())
     invalid = {}
     by_number = {}
     for order, p in enumerate(files):
         rel = p.relative_to(trees_dir).as_posix()
+        if p.is_symlink() or not p.resolve().is_relative_to(root):
+            invalid[rel] = ["symlinks are not read"]
+            continue
         try:
             raw = p.read_bytes()
             body = raw.decode("utf-8")
@@ -235,7 +248,7 @@ def build(trees_dir, out_dir, *, check=None):
             invalid[rel] = errs
             continue
         by_number.setdefault(doc["number"], []).append((order, doc))
-    companies = sorted((_company(e) for e in by_number.values()),
+    companies = sorted((_company(e, today) for e in by_number.values()),
                        key=lambda c: (c["name"].lower(), c["name"], c["number"]))
     (out_dir / "c").mkdir(parents=True, exist_ok=True)
     for stale in (out_dir / "c").glob("*.html"):
@@ -249,23 +262,28 @@ def build(trees_dir, out_dir, *, check=None):
             "nodes": sum(c["nodes"] for c in companies)}
 
 
-def _load_check():
-    for name in ("zeroout.community_check", "community_check"):
-        try:
-            return importlib.import_module(name).check
-        except ImportError:
-            continue
-    return None
+def load_check():
+    """The checker next to this file, loaded by path. Nothing on sys.path can stand in for it."""
+    path = Path(__file__).with_name("community_check.py")
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("_community_check_sibling", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.check
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    strict = "--strict" in argv
+    argv = [a for a in argv if a != "--strict"]
     if len(argv) != 2:
-        print("  usage: python -m zeroout.site_build TREES_DIR OUT_DIR")
+        print("  usage: python -m zeroout.site_build TREES_DIR OUT_DIR [--strict]")
         return 2
-    check = _load_check()
+    check = load_check()
     if check is None:
-        print("  check  community_check not found, files are only parsed")
+        print("  error  community_check.py is missing next to site_build.py, refusing to build unchecked")
+        return 2
     r = build(Path(argv[0]), Path(argv[1]), check=check)
     print(f"  files      {r['files']}")
     print(f"  companies  {r['companies']}")
@@ -274,7 +292,7 @@ def main(argv=None):
     for rel, errs in r["invalid"].items():
         for e in errs:
             print(f"  invalid  {rel}: {e}")
-    return 1 if r["invalid"] else 0
+    return 1 if strict and r["invalid"] else 0
 
 
 if __name__ == "__main__":

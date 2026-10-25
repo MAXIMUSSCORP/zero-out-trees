@@ -22,10 +22,16 @@ OUTCOMES = (
 )
 SOURCES = ("crawl", "phone")
 KEYS = set("0123456789*#")
-PATH = re.compile(r"trees/(\d{10})/([0-9a-f]{12})-(\d{8}T\d{6}Z)\.json")
+PATH = re.compile(r"trees/([0-9]{10})/([0-9]{4}-[0-9]{2}-[0-9]{2})-([0-9a-f]{16})\.json")
 OBS_PATH = re.compile(r"[0-9*#](\.[0-9*#])*")
-STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
-DIGITS = re.compile(r"\d(?:[ .\-]*\d){5,}")
+DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# A copy of redact.DIGIT_RUN, which this file cannot import; a test keeps the two equal.
+_DIGIT_WORDS = (
+    "zero|oh|one|two|three|four|five|six|seven|eight|nine|"
+    "cero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve"
+)
+_TOKEN = rf"(?:[0-9]|\b(?:{_DIGIT_WORDS})\b)"
+DIGITS = re.compile(rf"{_TOKEN}(?:[ \t.,()/\-]*{_TOKEN}){{3,}}", re.IGNORECASE | re.ASCII)
 TOP_KEYS = ("format", "number", "name", "contributed_at", "observations")
 OBS_KEYS = ("path", "prompt_text", "options", "outcome", "prompt_seconds", "heard_at", "source")
 
@@ -45,11 +51,11 @@ def _bad_constant(name: str):
     raise ValueError(name)
 
 
-def _stamp_ok(value) -> bool:
-    if not isinstance(value, str) or not STAMP.fullmatch(value):
+def _day_ok(value) -> bool:
+    if not isinstance(value, str) or not DAY.fullmatch(value):
         return False
     try:
-        datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         return False
     return True
@@ -57,8 +63,11 @@ def _stamp_ok(value) -> bool:
 
 def _control_chars(node, where: str, out: list[str]) -> None:
     if isinstance(node, str):
-        if any(unicodedata.category(c) == "Cc" for c in node):
+        cats = {unicodedata.category(c) for c in node}
+        if "Cc" in cats:
             out.append(f"{where or 'The file'} contains a control character, such as a line break or tab.")
+        if "Cf" in cats:
+            out.append(f"{where or 'The file'} contains a hidden formatting character, such as a zero-width space.")
     elif isinstance(node, dict):
         for k, v in node.items():
             _control_chars(k, f"A field name under {where or 'the file'}", out)
@@ -98,13 +107,13 @@ def _check_observation(i: int, o, out: list[str]) -> None:
         elif len(text) > MAX_TEXT:
             out.append(f"{where}.prompt_text is {len(text)} characters; the limit is {MAX_TEXT}.")
         elif DIGITS.search(text):
-            out.append(f"{where}.prompt_text still holds a run of 6 or more digits, which could be a private number.")
+            out.append(f"{where}.prompt_text still holds a run of 4 or more digits, which could be a private number.")
     secs = o.get("prompt_seconds")
     if "prompt_seconds" in o:
         if isinstance(secs, bool) or not isinstance(secs, (int, float)) or not 0 <= secs <= 120:
             out.append(f"{where}.prompt_seconds must be a number from 0 to 120, got {_short(secs)}.")
-    if "heard_at" in o and not _stamp_ok(o["heard_at"]):
-        out.append(f"{where}.heard_at must look like 2026-10-25T18:01:02Z, got {_short(o['heard_at'])}.")
+    if "heard_at" in o and not _day_ok(o["heard_at"]):
+        out.append(f"{where}.heard_at must be a date like 2026-10-25, got {_short(o['heard_at'])}.")
     if "source" in o and o["source"] not in SOURCES:
         out.append(f"{where}.source must be crawl or phone, got {_short(o['source'])}.")
     if "options" in o:
@@ -137,7 +146,7 @@ def _check_options(where: str, options, out: list[str]) -> None:
             elif len(label) > MAX_LABEL:
                 out.append(f"{at}.label is {len(label)} characters; the limit is {MAX_LABEL}.")
             elif DIGITS.search(label):
-                out.append(f"{at}.label still holds a run of 6 or more digits, which could be a private number.")
+                out.append(f"{at}.label still holds a run of 4 or more digits, which could be a private number.")
 
 
 def check(relpath: str, body: bytes) -> list[str]:
@@ -145,7 +154,7 @@ def check(relpath: str, body: bytes) -> list[str]:
     out: list[str] = []
     m = PATH.fullmatch(relpath or "")
     if not m:
-        out.append(f"The path {_short(relpath, 80)} must look like trees/<10 digit number>/<12 hex contributor>-<YYYYMMDDTHHMMSSZ>.json.")
+        out.append(f"The path {_short(relpath, 80)} must look like trees/<10 digit number>/<YYYY-MM-DD>-<16 hex>.json.")
     if len(body) > MAX_BYTES:
         return out + [f"The file is {len(body)} bytes; the limit is {MAX_BYTES}."]
     try:
@@ -160,7 +169,7 @@ def check(relpath: str, body: bytes) -> list[str]:
         out.append(f"format must be {FORMAT}, got {_short(fmt)}.")
     number = doc.get("number")
     if "number" in doc:
-        if not isinstance(number, str) or not re.fullmatch(r"\d{10}", number) or number[:3] not in TOLL_FREE:
+        if not isinstance(number, str) or not re.fullmatch(r"[0-9]{10}", number) or number[:3] not in TOLL_FREE:
             out.append(f"number must be a 10 digit US toll-free number (800, 888, 877, 866, 855, 844 or 833), got {_short(number)}.")
         elif m and m.group(1) != number:
             out.append(f"The folder {m.group(1)} does not match the number {number} inside the file.")
@@ -170,8 +179,12 @@ def check(relpath: str, body: bytes) -> list[str]:
             out.append(f"name must be a company name, got {_short(name)}.")
         elif len(name) > MAX_NAME:
             out.append(f"name is {len(name)} characters; the limit is {MAX_NAME}.")
-    if "contributed_at" in doc and not _stamp_ok(doc["contributed_at"]):
-        out.append(f"contributed_at must look like 2026-10-25T18:30:00Z, got {_short(doc['contributed_at'])}.")
+    day = doc.get("contributed_at")
+    if "contributed_at" in doc:
+        if not _day_ok(day):
+            out.append(f"contributed_at must be a date like 2026-10-25, got {_short(day)}.")
+        elif m and m.group(2) != day:
+            out.append(f"The file name date {m.group(2)} does not match contributed_at {day}.")
     obs = doc.get("observations")
     if "observations" in doc:
         if not isinstance(obs, list) or not 1 <= len(obs) <= MAX_OBSERVATIONS:
@@ -180,6 +193,9 @@ def check(relpath: str, body: bytes) -> list[str]:
         else:
             for i, o in enumerate(obs):
                 _check_observation(i, o, out)
+                heard = o.get("heard_at") if isinstance(o, dict) else None
+                if _day_ok(heard) and _day_ok(day) and heard > day:
+                    out.append(f"observations[{i}].heard_at {heard} is after contributed_at {day}.")
     _control_chars(doc, "", out)
     if len(out) > MAX_ERRORS:
         out = out[:MAX_ERRORS] + [f"{len(out) - MAX_ERRORS} more problems were not listed."]

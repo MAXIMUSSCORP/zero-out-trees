@@ -6,7 +6,7 @@ Your job is the part a program cannot judge.
 ## Every pull request
 
 1. One file per pull request, and it is added, never edited. CI fails any pull
-   request that modifies, renames or deletes an existing file under `trees/`.
+   request that changes anything other than adding that one file.
 2. CI must pass: the format check (`tools/community_check.py`) and the
    added-files-only check. Do not merge on red.
 3. Read the prompts. They should read like a company's phone menu ("For billing,
@@ -31,3 +31,13 @@ If a merged file turns out to hold personal data or abuse:
    `git filter-repo --path <file> --invert-paths`, then force push with the
    other maintainers' agreement.
 3. Tell the contributor if you can reach them.
+
+## Repository settings to turn on when the repo is created
+
+- Branch protection on `main`: require the `validate` check, require one review,
+  require review from code owners, and block force pushes.
+- Pages: set the source to GitHub Actions.
+- `CODEOWNERS` already puts `/.github/` and `/tools/` under `@MAXIMUSSCORP`.
+- The validate workflow runs on `pull_request_target` so that a fork cannot change
+  the checker that judges it. It never checks out or runs the pull request's code.
+  Keep it that way: do not add steps that execute anything from the pull request.
